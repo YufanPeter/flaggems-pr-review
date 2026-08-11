@@ -41,11 +41,55 @@ python3.11 scripts/check_is_cuda.py 3698 --json
 
 **真实案例**：成功检测到 PR #3698 的违规
 
-## 📋 计划中的检查（按优先级）
+### 2. `__init__.py` 注册顺序检查（P0）
 
-### P0（高频且规则明确）
-- [ ] `__init__.py` 注册顺序检查
-- [ ] `operators.yaml` 排序检查
+检测 `__all__` 列表是否按字母序排列。
+
+**为什么重要**：
+- 高频问题（6+ PRs）
+- 手动维护容易出错
+- isort 只管 import，不管 `__all__`
+
+**使用方法**：
+```bash
+# 检查单个 PR
+python3.11 scripts/check_init_registration.py <PR编号>
+python3.11 scripts/check_init_registration.py 3698
+
+# JSON 输出
+python3.11 scripts/check_init_registration.py 3698 --json
+```
+
+**测试覆盖**：
+- ✅ 9 个单元测试
+- ✅ 覆盖单行/多行/混合格式
+- ✅ 大小写敏感测试
+
+### 3. `operators.yaml` 排序检查（P0）
+
+检测算子 ID 是否按字母序排列。
+
+**为什么重要**：
+- 高频问题
+- 新增算子时容易插入到错误位置
+- 没有工具自动检查
+
+**使用方法**：
+```bash
+# 检查单个 PR
+python3.11 scripts/check_operators_yaml.py <PR编号>
+python3.11 scripts/check_operators_yaml.py 3698
+
+# JSON 输出
+python3.11 scripts/check_operators_yaml.py 3698 --json
+```
+
+**测试覆盖**：
+- ✅ 8 个单元测试
+- ✅ 真实算子名称测试
+- ✅ 下划线前缀测试
+
+## 📋 计划中的检查（按优先级）
 
 ### P1（中频且可编程）
 - [ ] Co-Authored-By trailer 检查
@@ -61,17 +105,22 @@ python3.11 scripts/check_is_cuda.py 3698 --json
 ```
 PR-Review/
 ├── scripts/
-│   ├── check_is_cuda.py              # is_cuda 滥用检查
-│   └── fetch_pr_diff.py              # PR diff 获取工具
+│   ├── check_is_cuda.py                # is_cuda 滥用检查
+│   ├── check_init_registration.py      # __init__.py 注册检查
+│   ├── check_operators_yaml.py         # operators.yaml 排序检查
+│   └── fetch_pr_diff.py                # PR diff 获取工具
 ├── tests/
-│   ├── test_check_is_cuda.py         # 基础测试
-│   ├── test_improved_check_is_cuda.py # 改进测试
-│   ├── test_realistic_scenario.py    # 真实场景测试
-│   └── manual_test_check_is_cuda.py  # 手动测试
+│   ├── test_check_is_cuda.py           # is_cuda 测试
+│   ├── test_improved_check_is_cuda.py  # is_cuda 改进测试
+│   ├── test_realistic_scenario.py      # is_cuda 真实场景测试
+│   ├── manual_test_check_is_cuda.py    # is_cuda 手动测试
+│   ├── test_check_init_registration.py # __init__.py 测试
+│   └── test_check_operators_yaml.py    # operators.yaml 测试
 ├── docs/
-│   ├── is_cuda-check-summary.md      # is_cuda 检查总结
-│   └── real-pr-validation-report.md  # 真实 PR 验证报告
-└── README.md                         # 本文档
+│   ├── is_cuda-check-summary.md        # is_cuda 检查总结
+│   └── real-pr-validation-report.md    # 真实 PR 验证报告
+├── diagnosis.md                        # Pre-commit 调查结果
+└── README.md                           # 本文档
 ```
 
 ## 🧪 运行测试
@@ -82,6 +131,8 @@ for test in tests/test_*.py; do python3.11 "$test" || exit 1; done
 
 # 运行单个测试
 python3.11 tests/test_check_is_cuda.py
+python3.11 tests/test_check_init_registration.py
+python3.11 tests/test_check_operators_yaml.py
 ```
 
 ## 📚 设计原则
@@ -122,9 +173,9 @@ assert x.is_cuda and out.is_cuda, "Inputs must be CUDA tensors"
 ## 🚀 下一步
 
 1. ✅ `is_cuda` 检查 - 已完成
-2. ⏳ Co-Authored-By trailer 检查 - 进行中
-3. ⏳ `__init__.py` 注册检查
-4. ⏳ `operators.yaml` 排序检查
+2. ✅ `__init__.py` 注册检查 - 已完成
+3. ✅ `operators.yaml` 排序检查 - 已完成
+4. ⏳ Co-Authored-By trailer 检查 - 下一步
 
 ## 📖 参考
 
