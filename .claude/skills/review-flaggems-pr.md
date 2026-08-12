@@ -1,6 +1,6 @@
 ---
 name: review-flaggems-pr
-description: 对 FlagGems PR 运行所有相关的可编程检查（is_cuda、排序、block_size、skipif、code-style），发现问题后智能修复
+description: 对 FlagGems PR 运行所有相关的可编程检查（is_cuda、排序、block_size、skipif、code-style、python-op），诊断问题后提出修复方案，经用户 review 确认后执行修复
 ---
 
 # Review FlagGems PR
@@ -27,12 +27,16 @@ description: 对 FlagGems PR 运行所有相关的可编程检查（is_cuda、�
    所有适用的检查可以并行运行，加速流程。
 
 4. **处理结果并修复**
-   - **自动修复**：排序问题、code-style 问题
-   - **报告问题**：is_cuda 违规、block_size 硬编码（需人工判断是否合理）
-   - **验证修复**：重跑检查确认修复成功
+   所有检查发现的问题都需要修复，统一走同一个流程：
+   - **诊断**：Agent 读取相关源码，分析每个问题的根因
+   - **提出方案**：向用户展示每处改动和理由
+   - **等待确认**：用户 review 后再执行（不做无声 auto-fix）
+   - **执行 + 验证**：修复后重跑对应检查确认清零
+   
+   唯一例外：排序（`init_registration`、`operators_yaml`）和机械 code-style（black/isort）是幂等、零风险的确定性改动，可直接修复后一并报告。
 
 5. **生成报告**
-   清晰汇总哪些通过、哪些修复、哪些需要人工处理。
+   清晰汇总哪些通过、哪些已修复、哪些方案待用户确认。
 
 ## 可用的检查工具
 
@@ -44,7 +48,7 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_is_cuda.py <PR> --js
 ```
 - **检查内容**：算子代码中是否使用了 `is_cuda`（违反跨芯片兼容原则）
 - **适用条件**：改动了 `src/flag_gems/ops/` 或 `src/flag_gems/fused/` 下的算子
-- **能否自动修复**：❌ 需人工判断（有时合理，有时需移除）
+- **修复流程**：Agent 诊断 → 提出方案 → 用户确认 → 执行
 - **退出码**：0=clean, 1=has_violations
 - **输出格式**：JSON（`--json`）或人类可读
 
@@ -56,7 +60,7 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_init_registration.py
 ```
 - **检查内容**：`__all__` 列表是否按字母序排列
 - **适用条件**：改动了 `__init__.py` 文件
-- **能否自动修复**：✅ 可以（读取 → 排序 → 写回）
+- **修复流程**：确定性改动（排序），可直接修复后报告
 - **退出码**：0=clean, 1=needs_fix
 
 **修复方法**：
@@ -73,7 +77,7 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_operators_yaml.py <P
 ```
 - **检查内容**：算子 ID 是否按字母序排列
 - **适用条件**：改动了 `operators.yaml`
-- **能否自动修复**：✅ 可以（YAML 解析 → 排序 → 写回）
+- **修复流程**：确定性改动（排序），可直接修复后报告
 - **退出码**：0=clean, 1=needs_fix
 
 **修复方法**：
@@ -113,7 +117,7 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_block_size.py <PR> -
 ```
 - **检查内容**：Triton kernel launcher 里的 `BLOCK_SIZE = <literal>` 硬编码
 - **适用条件**：改动了 `src/flag_gems/ops/` 或 `src/flag_gems/fused/` 下的算子
-- **能否自动修复**：❌ 需人工判断（性能权衡）
+- **修复流程**：Agent 诊断（读上下文、看 N 来源）→ 提出方案 → 用户确认 → 执行
 - **退出码**：0=clean, 1=has_violations
 - **输出格式**：JSON（`--json`）或人类可读
 
@@ -353,8 +357,8 @@ git push origin HEAD  # 确认后推送
 # 1. 读取 PR 5395 的文件列表
 # 2. 判断需要跑哪些检查
 # 3. 并行执行检查
-# 4. 自动修复排序和 code-style 问题
-# 5. 报告 is_cuda 违规（不修复）
+# 4. 直接修复确定性问题（排序、机械 code-style）
+# 5. 对 is_cuda / block_size / skipif / python-op 诊断根因、提出方案、等用户确认后修复
 # 6. 生成最终报告
 ```
 
