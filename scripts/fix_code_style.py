@@ -62,11 +62,26 @@ def get_pr_head(repo: str, pr_number: str) -> Dict[str, Any]:
 def clone_pr_head(repo: str, head: Dict[str, str], workdir: Path) -> Path:
     """把 PR head 精确 checkout 到 workdir，返回 clone 目录。"""
     clone_dir = workdir / "repo"
-    subprocess.run(
-        ['gh', 'repo', 'clone', head['fork'], str(clone_dir), '--',
-         '--branch', head['branch'], '--depth', '1'],
-        capture_output=True, text=True, check=True,
-    )
+
+    # 优先用 gh clone（尊重用户的 gh 配置）
+    try:
+        subprocess.run(
+            ['gh', 'repo', 'clone', head['fork'], str(clone_dir), '--',
+             '--branch', head['branch'], '--depth', '1'],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        # SSH 失败时自动回退到 HTTPS
+        if 'Permission denied (publickey)' in e.stderr or 'git@github.com' in e.stderr:
+            print("  ℹ️  gh clone 失败（可能缺少 SSH 密钥），回退到 HTTPS...", file=sys.stderr)
+            fork_url = f"https://github.com/{head['fork']}.git"
+            subprocess.run(
+                ['git', 'clone', fork_url, str(clone_dir),
+                 '--branch', head['branch'], '--depth', '1'],
+                capture_output=True, text=True, check=True,
+            )
+        else:
+            raise
     actual = subprocess.run(
         ['git', '-C', str(clone_dir), 'rev-parse', 'HEAD'],
         capture_output=True, text=True, check=True,
