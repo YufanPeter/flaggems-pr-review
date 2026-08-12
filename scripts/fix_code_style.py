@@ -59,43 +59,77 @@ def get_pr_head(repo: str, pr_number: str) -> Dict[str, Any]:
     }
 
 
-def clone_pr_head(repo: str, head: Dict[str, str], workdir: Path) -> Path:
-    """把 PR head 精确 checkout 到 workdir，返回 clone 目录。"""
+def check_push_permission(fork_repo: str) -> bool:
+    """检测用户是否有 push 权限到 fork 仓库。"""
+    try:
+        result = subprocess.run(
+            ['gh', 'api', f'repos/{fork_repo}', '--jq', '.permissions.push'],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        return result.stdout.strip() == 'true'
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def clone_pr_head(repo: str, pr_number: str, head: Dict[str, str], workdir: Path) -> Tuple[Path, str]:
+    """把 PR head 精确 checkout 到 workdir，返回 (clone_dir, mode)。
+
+    mode: 'writable' = 可以 push 回 fork，'readonly' = 只读模式
+    """
     clone_dir = workdir / "repo"
 
-    # 优先用 gh clone（尊重用户的 gh 配置）
-    try:
-        subprocess.run(
-            ['gh', 'repo', 'clone', head['fork'], str(clone_dir), '--',
-             '--branch', head['branch'], '--depth', '1'],
-            capture_output=True, text=True, check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        # SSH 失败时自动回退到 HTTPS
-        if 'Permission denied (publickey)' in e.stderr or 'git@github.com' in e.stderr:
-            print("  ℹ️  gh clone 失败（可能缺少 SSH 密钥），回退到 HTTPS...", file=sys.stderr)
-            fork_url = f"https://github.com/{head['fork']}.git"
+    # 策略1: 优先尝试 clone fork（如果有权限，后续可以 push）
+    can_push = check_push_permission(head['fork'])
+
+    if can_push:
+        try:
             subprocess.run(
-                ['git', 'clone', fork_url, str(clone_dir),
+                ['gh', 'repo', 'clone', head['fork'], str(clone_dir), '--',
                  '--branch', head['branch'], '--depth', '1'],
                 capture_output=True, text=True, check=True,
             )
-        else:
-            raise
+            return clone_dir, 'writable'
+        except subprocess.CalledProcessError as e:
+            if 'Permission denied (publickey)' in e.stderr or 'git@github.com' in e.stderr:
+                print("  ℹ️  gh clone 失败（SSH 问题），尝试 HTTPS...", file=sys.stderr)
+                try:
+                    fork_url = f"https://github.com/{head['fork']}.git"
+                    subprocess.run(
+                        ['git', 'clone', fork_url, str(clone_dir),
+                         '--branch', head['branch'], '--depth', '1'],
+                        capture_output=True, text=True, check=True,
+                    )
+                    return clone_dir, 'writable'
+                except subprocess.CalledProcessError:
+                    print("  ℹ️  fork 仓库不可访问，从主仓库 fetch PR ref...", file=sys.stderr)
+            else:
+                print("  ℹ️  clone fork 失败，从主仓库 fetch PR ref...", file=sys.stderr)
+    else:
+        print("  ℹ️  无 push 权限，从主仓库 fetch PR ref（只读模式）...", file=sys.stderr)
+
+    # 策略2: 从主仓库 fetch PR ref（只读）
+    subprocess.run(
+        ['git', 'clone', '--depth', '1', f'https://github.com/{repo}.git', str(clone_dir)],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        ['git', '-C', str(clone_dir), 'fetch', 'origin', f'pull/{pr_number}/head'],
+        capture_output=True, text=True, check=True,
+    )
+    subprocess.run(
+        ['git', '-C', str(clone_dir), 'checkout', 'FETCH_HEAD'],
+        capture_output=True, text=True, check=True,
+    )
+
+    # 验证 SHA
     actual = subprocess.run(
         ['git', '-C', str(clone_dir), 'rev-parse', 'HEAD'],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     if actual != head['sha']:
-        subprocess.run(
-            ['git', '-C', str(clone_dir), 'fetch', '--depth', '1', 'origin', head['sha']],
-            capture_output=True, text=True, check=True,
-        )
-        subprocess.run(
-            ['git', '-C', str(clone_dir), 'checkout', head['sha']],
-            capture_output=True, text=True, check=True,
-        )
-    return clone_dir
+        raise RuntimeError(f"SHA 不匹配: expected {head['sha']}, got {actual}")
+
+    return clone_dir, 'readonly'
 
 
 def run_pre_commit(clone_dir: Path, files: List[str]) -> Dict[str, Any]:
@@ -213,7 +247,7 @@ Output the complete corrected file."""
     # 调用 Claude
     try:
         result = subprocess.run(
-            ['claude', '--model', 'claude-sonnet-4-20250514', '--no-cache'],
+            ['claude', '--model', 'claude-sonnet-4-20250514'],
             input=prompt, capture_output=True, text=True, check=True,
         )
         fixed_content = result.stdout.strip()
@@ -287,12 +321,34 @@ def make_commit(clone_dir: Path, changed_files: List[str], msg: str) -> str:
     ).stdout.strip()
 
 
-def get_commit_diffstat(clone_dir: Path) -> str:
-    """返回刚生成的 commit 的 diffstat，供人工确认将要 push 的内容。"""
-    return subprocess.run(
-        ['git', '-C', str(clone_dir), 'show', '--stat', '--oneline', 'HEAD'],
+def generate_patch(clone_dir: Path, output_file: Path) -> None:
+    """生成 patch 文件供第三方应用。"""
+    result = subprocess.run(
+        ['git', '-C', str(clone_dir), 'format-patch', '--stdout', 'HEAD~1'],
         capture_output=True, text=True, check=True,
-    ).stdout
+    )
+    output_file.write_text(result.stdout)
+
+
+def print_next_steps(clone_dir: Path, head: Dict[str, str], mode: str, pr_number: str) -> None:
+    """打印修复完成后的下一步操作。"""
+    print("\n  ✅ 修复完成，所有检查通过")
+    print("  ── 将要提交的修改 ──")
+    print(get_commit_diffstat(clone_dir))
+
+    if mode == 'writable':
+        print(f"\n  下一步（你有 push 权限）：")
+        print(f"    cd {clone_dir}")
+        print(f"    git push origin HEAD:{head['branch']}")
+    else:
+        patch_file = clone_dir.parent / f"pr-{pr_number}.patch"
+        generate_patch(clone_dir, patch_file)
+        print(f"\n  下一步（只读模式，已生成 patch）：")
+        print(f"    patch 文件: {patch_file}")
+        print(f"    临时目录: {clone_dir}")
+        print(f"\n  应用修复的方式：")
+        print(f"    1. 在 PR 中留 comment 描述问题并附上 patch")
+        print(f"    2. 或让 PR 作者运行此脚本自动修复")
 
 
 def fix_pr_code_style(pr_ref: str, skip_tests: bool = False, keep_dir: bool = False) -> Dict[str, Any]:
@@ -308,7 +364,7 @@ def fix_pr_code_style(pr_ref: str, skip_tests: bool = False, keep_dir: bool = Fa
         print(f"→ PR #{pr_number} @ {repo}")
         print(f"  head: {head['fork']}@{head['branch']} ({head['sha'][:10]})")
 
-        clone_dir = clone_pr_head(repo, head, workdir)
+        clone_dir, mode = clone_pr_head(repo, pr_number, head, workdir)
         pr_files = [f for f in head['changed_files'] if (clone_dir / f).is_file()]
         print(f"  clone 完成，PR 改动 {len(head['changed_files'])} 文件"
               f"（现存 {len(pr_files)}）")
@@ -335,14 +391,13 @@ def fix_pr_code_style(pr_ref: str, skip_tests: bool = False, keep_dir: bool = Fa
         if second['exit_code'] == 0:
             print("  ✅ 机械修复后即全绿")
             keep = True
-            print(f"  临时目录：{clone_dir}")
-            print(f"  如确认无误，手动 push：")
-            print(f"    git -C {clone_dir} push origin HEAD:{head['branch']}")
+            print_next_steps(clone_dir, head, mode, pr_number)
             return {
                 'status': 'auto_fixable',
                 'pr': pr_number,
                 'clone_dir': str(clone_dir),
                 'mechanical_only': True,
+                'mode': mode,
             }
 
         # 解析剩余错误
@@ -424,20 +479,15 @@ def fix_pr_code_style(pr_ref: str, skip_tests: bool = False, keep_dir: bool = Fa
                     'reason': 'tests_failed',
                 }
 
-        print("  ✅ 修复完成，所有检查通过")
-        print("  ── 将要 push 的内容 ──")
-        print(get_commit_diffstat(clone_dir))
-        print(f"  如确认无误，手动 push：")
-        print(f"    git -C {clone_dir} push origin HEAD:{head['branch']}")
         keep = True
-        print(f"  临时目录已保留：{clone_dir}")
+        print_next_steps(clone_dir, head, mode, pr_number)
 
         return {
             'status': 'auto_fixable',
             'pr': pr_number,
             'clone_dir': str(clone_dir),
             'fixed_files': fixed_files,
-            'failed_files': failed_files,
+            'mode': mode,
         }
 
     finally:
