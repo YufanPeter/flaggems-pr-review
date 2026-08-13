@@ -5,7 +5,7 @@ description: 对 FlagGems PR 运行所有相关的可编程检查（is_cuda、�
 
 # Review FlagGems PR
 
-对指定的 FlagGems PR 运行所有相关的可编程检查，根据 PR 的实际改动智能选择检查项，发现问题后尝试自动修复。
+对指定的 FlagGems PR 运行所有相关的可编程检查，根据 PR 的实际改动智能选择检查项。发现问题后提出修复方案并标注风险等级，经用户 review 确认后再执行 —— 任何改动执行前都需人工确认，无例外。
 
 ## 工作流程
 
@@ -27,16 +27,17 @@ description: 对 FlagGems PR 运行所有相关的可编程检查（is_cuda、�
    所有适用的检查可以并行运行，加速流程。
 
 4. **处理结果并修复**
-   所有检查发现的问题都需要修复，统一走同一个流程：
+   **所有**检查发现的问题都走同一个流程，没有例外 —— 任何改动执行前都必须先经用户确认：
    - **诊断**：Agent 读取相关源码，分析每个问题的根因
-   - **提出方案**：向用户展示每处改动和理由
-   - **等待确认**：用户 review 后再执行（不做无声 auto-fix）
+   - **提出方案 + 标注风险**：向用户展示每处改动和理由，并给出**风险等级**：
+     - 🟢 **无风险**：幂等、确定性的机械改动（排序、black/isort 格式化）
+     - 🟡 **低风险**：局部逻辑改动（删除 skipif、补 import、改测试断言）
+     - 🔴 **高风险**：影响算子实现语义、跨芯片行为的改动
+   - **等待 human review**：用户 review 方案后才执行，**不做无声 auto-fix，也没有"零风险直接改"的例外**
    - **执行 + 验证**：修复后重跑对应检查确认清零
-   
-   唯一例外：排序（`init_registration`、`operators_yaml`）和机械 code-style（black/isort）是幂等、零风险的确定性改动，可直接修复后一并报告。
 
 5. **生成报告**
-   清晰汇总哪些通过、哪些已修复、哪些方案待用户确认。
+   清晰汇总哪些通过、哪些方案待用户确认、确认后哪些已修复。
 
 ## 可用的检查工具
 
@@ -60,7 +61,7 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_init_registration.py
 ```
 - **检查内容**：`__all__` 列表是否按字母序排列
 - **适用条件**：改动了 `__init__.py` 文件
-- **修复流程**：确定性改动（排序），可直接修复后报告
+- **修复流程**：排序改动（🟢 无风险）→ 提出方案标注风险 → 用户确认 → 执行
 - **退出码**：0=clean, 1=needs_fix
 
 **修复方法**：
@@ -77,7 +78,7 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_operators_yaml.py <P
 ```
 - **检查内容**：算子 ID 是否按字母序排列
 - **适用条件**：改动了 `operators.yaml`
-- **修复流程**：确定性改动（排序），可直接修复后报告
+- **修复流程**：排序改动（🟢 无风险）→ 提出方案标注风险 → 用户确认 → 执行
 - **退出码**：0=clean, 1=needs_fix
 
 **修复方法**：
@@ -87,29 +88,40 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_operators_yaml.py <P
 # 写回，保持格式
 ```
 
-### 4. Code-style 检查和修复
+### 4. Code-style 检查和修复（两阶段模式）
+
+**Phase 1: 计算修复方案（dry-run）**
 ```bash
-python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/fix_code_style.py <PR> [--skip-tests]
+python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/fix_code_style_v2.py dry-run <PR> --json
 ```
 - **检查内容**：black、isort、flake8、mypy
 - **适用条件**：改动了任何 `.py` 文件
-- **能否自动修复**：✅ 大部分可以
-  - 机械修复：black、isort、end-of-file-fixer（幂等、零风险）
-  - Agent 修复：flake8 未使用 import/变量、行太长、mypy 类型标注
-- **退出码**：0=clean/fixed, 1=needs_human
-- **输出状态**：
-  - `clean`：首次运行全绿，无需修复
-  - `auto_fixable`：已修复并生成 commit（未 push）
-  - `needs_human`：仍有无法自动修的问题
+- **输出**：JSON 格式包含
+  - `status`: 'clean' | 'fixable' | 'needs_human'
+  - `mechanical_diff`: 机械修复的 diff（black/isort/eof）
+  - `agent_diff`: Agent 修复的 diff（flake8/mypy）
+  - `risk_levels`: 每个文件的风险等级（'green' | 'yellow'）
+  - `state_file`: 状态文件路径，用于 phase 2
 
-**修复流程**：
-1. Clone PR head 到临时目录
-2. 只对 PR 改动的文件运行 pre-commit（对齐 CI）
-3. 机械修复（black/isort）
-4. Agent 修复（flake8/mypy），每个文件最多 3 次重试
-5. 跑 PR 相关测试验证（可用 `--skip-tests` 跳过加速）
-6. 重跑 pre-commit 验证全绿（fail-closed）
-7. 生成 commit（但不自动 push）
+**Phase 2: 应用修复（apply）**
+```bash
+python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/fix_code_style_v2.py apply <state_file>
+```
+- **输入**：Phase 1 生成的状态文件
+- **行为**：在临时 clone 里 commit 修复（不自动 push）
+- **输出**：commit SHA 列表 + push 指令
+
+**修复流程（遵循统一原则）**：
+1. **Phase 1 (propose)**: dry-run 计算修复，输出 diff + 风险标注
+2. **Human review**: Agent 向用户展示修复方案并标注风险
+   - 🟢 **无风险**: black/isort/eof 机械格式化
+   - 🟡 **低风险**: flake8/mypy Agent 修复（删 import、断行、补类型）
+3. **Phase 2 (fix)**: 用户确认后，apply 执行 commit
+4. **Verify**: 重跑 pre-commit 确认清零
+
+**退出码**：0=clean/fixable, 1=needs_human, 2=error
+
+**关键**: 此检查现在完全遵循统一原则 **detect → propose → approve → fix → verify**，与其他检查一致。
 
 ### 5. BLOCK_SIZE 硬编码检查
 ```bash
@@ -170,6 +182,59 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_skipif.py <PR> --jso
 @pytest.mark.skipif(TE_OP is None, reason="TransformerEngine not installed")
 # → 依赖检查，可能是合理的前提条件
 ```
+
+#### 核心原则：reason 是「主张」，不是「证据」
+
+skipif 的分类只分两步（脚本已按此实现）：
+1. **没有 reason** → 明确错误，直接删除。
+2. **有 reason** → 标记为 `needs_verification`，**必须验证 reason 是否真的成立**，不能因为写了 reason 就放过。
+
+脚本会为每个带 reason 的 skipif 输出：
+- `issue_ref` / `operator`：从 reason 提取的 issue 号、从文件名推导的算子名
+- `verification_checklist`：逐条要核对的点
+- `timeline`：**自动**拉取 issue 与 PR 的创建时间做对比，给出 `verdict`
+  （`reason_invalid` / `timeline_ok` / `unknown`）
+
+#### 验证 reason 的三个校验点（按此顺序逐条排查）
+
+1. **算子名匹配**：issue 是否真的把这个算子列为不支持？
+   近似名不算匹配。
+   > 校准案例 **PR #5399**：reason 引用 Issue #5254，但该 issue 列的是
+   > `special_chebyshev_polynomial_**w**`，PR 是 `_**t**` 变体 —— 名称对不上，reason 不成立。
+
+2. **时间线（机械可判定，脚本已自动完成）**：issue 创建时间是否早于 PR？
+   **早于 PR 的 issue 不可能描述本 PR 新增的实现 —— 因果倒置，reason 不成立。**
+   看脚本输出的 `timeline.verdict`：
+   - `reason_invalid` → 因果倒置，判错
+   - `timeline_ok` → 时间上可能覆盖，继续核对算子名与 issue 内容
+   - `unknown` → 时间戳拉取失败，人工核对
+   > 校准案例 **PR #5290**：reason 引用 Issue #4131（2026-06 创建，基于更早的
+   > PR #3782 旧 backend），PR 是 2026-08 才新增的 convolution Triton kernel。
+   > 一个 6 月的 issue 覆盖不了 8 月的新实现 —— 判错。
+
+3. **issue 质量与状态**：issue 描述是否清晰、是否被维护者质疑、state 是否仍 OPEN、
+   是否只是测试基准问题（如标题 "failed without --ref cpu" 其实是 `--ref` 配置问题，
+   而非算子真的不支持）。描述含糊或问题性质对不上，不足以支撑跳过整个测试。
+
+**结论逻辑**：三点中任何一点不成立 → reason 不成立 → 删除 skipif。
+三点全部成立才可保留，且需在报告中注明「保留但需跟踪 issue 修复进度」。
+
+#### 终判分流：哪些不用 agent 看，哪些必须看
+
+脚本的 `auto_verdict` / `needs_agent_verification` 只决定 **agent 要不要额外读 issue 去验证**，
+**不决定要不要汇报和是否直接改**。无论哪种结论，所有 skipif 的删除动作都统一走
+「汇总 → 向用户展示方案和理由 → 等用户确认 → 执行 → 重跑验证」，不做无声 auto-fix。
+
+| auto_verdict | needs_agent_verification | 含义 | agent 的验证工作量 |
+|---|---|---|---|
+| `confirmed_error` | `false` | 无 reason，或时间线倒置（issue 早于 PR） | **无需读 issue**，脚本已给出足够依据，直接把「建议删除」写进待确认方案 |
+| `pending` | `true` | 时间线未证伪（issue 晚于/接近 PR，或无 issue 号，或时间戳拉取失败） | **需读 issue**，核对算子名 + issue 内容/状态，得出结论后再写进待确认方案 |
+
+- **时间线倒置 = 逻辑硬事实**：issue 比 PR 还早，代码那时都不存在，issue 不可能在描述本 PR 的新实现 → 脚本可直接给出「确认错误」的依据，agent 不用再花力气读 issue 正文。
+- **其余的仍需 agent 验证**：脚本只能判时间线，算子名语义匹配、issue 描述质量/状态这些要读内容才能定，交给 agent。
+- **两种结论都要汇报**：`confirmed_error` 省掉的是 agent 的验证成本，不是用户的知情权和确认权。方案里如实标注每个 skipif 是「脚本已确认」还是「agent 核对后确认」，最终都由用户拍板。
+
+`summary` 里也有汇总：`confirmed_error`（已定案的错误数）和 `needs_agent_verification`（还需 agent 核对的数量），供组织报告用。
 
 ### 7. python-op CI 检查
 ```bash
@@ -278,17 +343,16 @@ wait
 6. `logs_unavailable` 时：告知日志已过期，提供 Job URL，让用户手动确认失败类型后再走上述流程
 
 #### 排序问题（__init__.py 或 operators.yaml）
-- **自动修复**
-- Clone PR 仓库到临时目录
-- 读取文件 → 排序 → 写回
-- 验证：重跑检查脚本，退出码应为 0
-- 生成 commit（但不自动 push）
+1. Clone PR 仓库到临时目录，读取文件算出排序后的结果
+2. **向用户展示 diff，标注 🟢 无风险（幂等排序），等确认**
+3. 确认后：写回 → 重跑检查脚本验证（退出码应为 0）
+4. 生成 commit（但不自动 push）
 
 #### code-style 问题
-- **调用 fix_code_style.py**
+- **调用 fix_code_style.py 算出改动**
 - 根据返回状态：
   - `clean`：无需处理
-  - `auto_fixable`：修复成功，已生成 commit
+  - `fixable`：**向用户展示 diff 和风险等级（机械修复 🟢 / Agent 修复 🟡），等确认后**再落盘生成 commit
   - `needs_human`：报告无法自动修的问题
 
 ### Step 5: 生成最终报告
@@ -296,32 +360,36 @@ wait
 ```
 ==================== PR #5395 Review 报告 ====================
 
+检查结果：
 ✅ is_cuda: 无违规
 ✅ block_size: 无硬编码
-🔴 skipif: 发现 2 个 vendor-specific skipif（需修复）
+🔴 skipif: 发现 2 个 vendor-specific skipif
   - tests/test_copy.py:114: flag_gems.vendor_name == "metax"
   - tests/test_copy.py:171: flag_gems.vendor_name == "metax"
-✅ __init__.py: 已自动修复（1 个文件）
-  - src/flag_gems/__init__.py: __all__ 列表已按字母序排序
-✅ code-style: 已自动修复（2 个文件）
-  - src/flag_gems/ops/add.py: black + 移除未使用的 import
-  - tests/test_add.py: isort
+🟡 __init__.py: __all__ 列表未按字母序（1 个文件）
+🟡 code-style: black/isort/flake8 待修（2 个文件）
 
-⚠️  需要人工处理：
+==================== 待确认的修复方案 ====================
+以下改动均**等你 review 确认后**才执行：
+
+[1] 🟢 无风险 · src/flag_gems/__init__.py
+    __all__ 列表按字母序排序（幂等）
+
+[2] 🟢 无风险 · tests/test_add.py
+    isort 重排 import
+
+[3] 🟡 低风险 · src/flag_gems/ops/add.py
+    black 格式化 + 移除未使用的 import
+
+[4] 🟡 低风险 · tests/test_copy.py:114,171
+    删除 vendor-specific skipif（依据：agent 核对确认 reason 不成立）
+    <展示 diff>
+
+⚠️  无法自动修，需你处理：
   - tests/test_add.py:15: flake8 F821 - undefined name 'foo'
 
-==================== 修复的文件 ====================
-已生成 commit（未 push）：
-  M src/flag_gems/__init__.py
-  M src/flag_gems/ops/add.py
-  M tests/test_add.py
-
-临时目录：/tmp/flaggems-pr-5395-xyz
-
-下一步：
-cd /tmp/flaggems-pr-5395-xyz
-git diff HEAD~1  # 查看修改
-git push origin HEAD  # 确认后推送
+请确认要执行哪些方案（全部 / 指定编号 / 跳过）。确认后我会在
+临时目录 /tmp/flaggems-pr-5395-xyz 落盘、重跑检查验证清零、生成 commit（不自动 push）。
 ```
 
 ## 安全边界
@@ -334,10 +402,9 @@ git push origin HEAD  # 确认后推送
    - 所有修复在临时 clone 里进行（`/tmp/flaggems-pr-<PR>-<random>`）
    - 不影响用户的工作目录
 
-3. **人工确认**：
-   - 默认不自动 push
-   - 打印修改内容和 push 命令
-   - 用户确认后手动 push
+3. **人工确认（两道）**：
+   - **改动前**：任何修复（含排序、机械 code-style 等零风险改动）落盘前，都先展示方案 + 风险等级，等用户 review 确认 —— 无例外
+   - **push 前**：默认不自动 push，打印修改内容和 push 命令，用户确认后手动 push
 
 4. **fail-closed**：
    - 修复后必须重跑检查全绿才生成 commit
@@ -357,8 +424,9 @@ git push origin HEAD  # 确认后推送
 # 1. 读取 PR 5395 的文件列表
 # 2. 判断需要跑哪些检查
 # 3. 并行执行检查
-# 4. 直接修复确定性问题（排序、机械 code-style）
-# 5. 对 is_cuda / block_size / skipif / python-op 诊断根因、提出方案、等用户确认后修复
+# 4. 对所有问题（排序、code-style、is_cuda、block_size、skipif、python-op）
+#    诊断根因、提出修复方案并标注风险等级
+# 5. 等用户 review 确认后再执行修复，重跑检查验证清零
 # 6. 生成最终报告
 ```
 
