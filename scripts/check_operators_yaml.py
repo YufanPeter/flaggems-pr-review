@@ -13,8 +13,8 @@ import sys
 from typing import List, Dict, Any, Optional
 
 
-def get_pr_diff(pr_url_or_number: str) -> str:
-    """获取 PR 的 diff 内容"""
+def get_pr_diff(pr_url_or_number: str) -> tuple:
+    """获取 PR 的 diff 内容，返回 (diff_content, pr_number, repo)"""
     if pr_url_or_number.isdigit():
         pr_number = pr_url_or_number
         repo = "FlagOpen/FlagGems"
@@ -31,7 +31,7 @@ def get_pr_diff(pr_url_or_number: str) -> str:
         text=True,
         check=True
     )
-    return result.stdout
+    return result.stdout, pr_number, repo
 
 
 def parse_diff_files(diff_content: str) -> Dict[str, List[tuple]]:
@@ -42,12 +42,13 @@ def parse_diff_files(diff_content: str) -> Dict[str, List[tuple]]:
     """
     files = {}
     current_file = None
-    current_line_number = 0
+    current_line_number = None
 
     for line in diff_content.split('\n'):
         if line.startswith('+++ b/'):
             current_file = line[6:]
             files[current_file] = []
+            current_line_number = None
             continue
 
         if line.startswith('@@'):
@@ -57,11 +58,12 @@ def parse_diff_files(diff_content: str) -> Dict[str, List[tuple]]:
             continue
 
         if line.startswith('+') and not line.startswith('+++'):
-            if current_file:
+            if current_file and current_line_number is not None:
                 files[current_file].append((current_line_number, line[1:]))
                 current_line_number += 1
         elif not line.startswith('-'):
-            current_line_number += 1
+            if current_line_number is not None:
+                current_line_number += 1
 
     return files
 
@@ -159,7 +161,7 @@ def main():
 
     try:
         # 获取 PR diff
-        diff_content = get_pr_diff(args.pr)
+        diff_content, pr_number, repo = get_pr_diff(args.pr)
 
         # 解析文件和新增行
         files = parse_diff_files(diff_content)
@@ -171,6 +173,8 @@ def main():
         if args.json:
             result = {
                 'check': 'operators_yaml_order',
+                'pr': pr_number,
+                'repo': repo,
                 'status': 'failed' if violations else 'passed',
                 'violations': violations
             }
@@ -192,10 +196,10 @@ def main():
         print(f"❌ 获取 PR diff 失败: {e}", file=sys.stderr)
         if e.stderr:
             print(e.stderr, file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
     except Exception as e:
         print(f"❌ 错误: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
 
 if __name__ == '__main__':

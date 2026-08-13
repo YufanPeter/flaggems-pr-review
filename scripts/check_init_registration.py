@@ -13,8 +13,8 @@ import sys
 from typing import List, Dict, Any, Optional
 
 
-def get_pr_diff(pr_url_or_number: str) -> str:
-    """获取 PR 的 diff 内容"""
+def get_pr_diff(pr_url_or_number: str) -> tuple:
+    """获取 PR 的 diff 内容，返回 (diff_content, pr_number, repo)"""
     if pr_url_or_number.isdigit():
         pr_number = pr_url_or_number
         repo = "FlagOpen/FlagGems"
@@ -31,7 +31,7 @@ def get_pr_diff(pr_url_or_number: str) -> str:
         text=True,
         check=True
     )
-    return result.stdout
+    return result.stdout, pr_number, repo
 
 
 def parse_diff_files(diff_content: str) -> Dict[str, List[tuple]]:
@@ -120,9 +120,16 @@ def extract_all_list(lines: List[tuple]) -> Optional[List[str]]:
     # 场景2：启发式检测 - 如果没有找到 __all__ = [，
     # 但有看起来像列表条目的行（引号包裹的字符串，带逗号）
     if not entries:
+        # 检查是否有至少2行连续的字符串字面量模式，避免误判单个字符串
+        string_literal_lines = []
         for line_num, content in lines:
             # 匹配模式：    "identifier",
             if re.match(r'^\s*["\'][^"\']+["\']\s*,?\s*$', content.strip()):
+                string_literal_lines.append((line_num, content))
+
+        # 只有连续2行以上的字符串字面量才认为是 __all__ 条目
+        if len(string_literal_lines) >= 2:
+            for line_num, content in string_literal_lines:
                 matches = re.findall(r'["\']([^"\']+)["\']', content)
                 entries.extend(matches)
 
@@ -197,7 +204,7 @@ def main():
 
     try:
         # 获取 PR diff
-        diff_content = get_pr_diff(args.pr)
+        diff_content, pr_number, repo = get_pr_diff(args.pr)
 
         # 解析文件和新增行
         files = parse_diff_files(diff_content)
@@ -209,6 +216,8 @@ def main():
         if args.json:
             result = {
                 'check': 'init_registration_order',
+                'pr': pr_number,
+                'repo': repo,
                 'status': 'failed' if violations else 'passed',
                 'violations': violations
             }
@@ -230,10 +239,10 @@ def main():
         print(f"❌ 获取 PR diff 失败: {e}", file=sys.stderr)
         if e.stderr:
             print(e.stderr, file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
     except Exception as e:
         print(f"❌ 错误: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
 
 if __name__ == '__main__':

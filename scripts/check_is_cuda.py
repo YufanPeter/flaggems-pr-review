@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 
-def get_pr_diff(pr_url_or_number: str) -> str:
-    """获取 PR 的 diff 内容"""
+def get_pr_diff(pr_url_or_number: str) -> tuple:
+    """获取 PR 的 diff 内容，返回 (diff_content, pr_number, repo)"""
     # 从 URL 或纯数字解析 owner/repo 和 PR 编号
     if pr_url_or_number.isdigit():
         # 纯数字，需要指定 repo（默认 FlagOpen/FlagGems）
@@ -39,7 +39,7 @@ def get_pr_diff(pr_url_or_number: str) -> str:
         text=True,
         check=True
     )
-    return result.stdout
+    return result.stdout, pr_number, repo
 
 
 def parse_diff_files(diff_content: str) -> Dict[str, List[tuple]]:
@@ -164,13 +164,13 @@ def check_is_cuda_abuse(files: Dict[str, List[tuple]]) -> List[Dict[str, Any]]:
             'reference': 'PR #3726: "is_cuda is invalid for non NV chips"'
         },
         {
-            'regex': re.compile(r'\btorch\.cuda\b(?!nn)'),  # 排除 torch.cudnn
+            'regex': re.compile(r'\btorch\.cuda\b(?!nn|\.amp)'),  # 排除 torch.cudnn 和 torch.cuda.amp
             'description': '直接使用 torch.cuda 模块',
             'suggestion': '使用 flag_gems.runtime.torch_device_fn',
             'reference': 'flaggems-domain.md §2.7'
         },
         {
-            'regex': re.compile(r'device\.type\s*==\s*["\']cuda["\']'),
+            'regex': re.compile(r'device\.type\s*(==|!=|in)\s*["\']cuda["\']'),
             'description': '硬编码 "cuda" 字符串',
             'suggestion': '使用 runtime.device.name',
             'reference': 'flaggems-domain.md §2.7'
@@ -227,7 +227,7 @@ def main():
 
     try:
         # 获取 PR diff
-        diff_content = get_pr_diff(args.pr)
+        diff_content, pr_number, repo = get_pr_diff(args.pr)
 
         # 解析文件和新增行
         files = parse_diff_files(diff_content)
@@ -239,6 +239,8 @@ def main():
         if args.json:
             result = {
                 'check': 'is_cuda_abuse',
+                'pr': pr_number,
+                'repo': repo,
                 'status': 'failed' if violations else 'passed',
                 'violations': violations
             }
@@ -261,10 +263,10 @@ def main():
         print(f"❌ 获取 PR diff 失败: {e}", file=sys.stderr)
         if e.stderr:
             print(e.stderr, file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
     except Exception as e:
         print(f"❌ 错误: {e}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
 
 if __name__ == '__main__':
