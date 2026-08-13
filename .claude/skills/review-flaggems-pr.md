@@ -359,42 +359,134 @@ wait
   - `fixable`：有修复方案，按上述流程走
   - `needs_human`：无法自动修，报告阻塞的 hooks
 
-### Step 5: 生成最终报告
+### Step 5: 生成 Review 阶段报告
 
+在完成所有检查、分析问题、提出修复方案后，生成待确认方案报告：
+
+```bash
+# 准备检查结果 JSON
+cat > checks-result.json << 'EOF'
+{
+  "_meta": {"pr": "5395", "repo": "flagos-ai/FlagGems", "branch": "fix/add-convolution"},
+  "is_cuda": {"status": "passed", "violations": []},
+  "skipif": {"status": "failed", "violations": [...]},
+  "code_style": {"status": "fixable", "mechanical_files": [...], "agent_files": [...]}
+}
+EOF
+
+# 生成报告
+python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/generate_report.py \
+  single-review 5395 \
+  --repo flagos-ai/FlagGems \
+  --branch fix/add-convolution \
+  --checks checks-result.json \
+  --output reports/PR-5395-review.md
 ```
-==================== PR #5395 Review 报告 ====================
 
-检查结果：
-✅ is_cuda: 无违规
-✅ block_size: 无硬编码
-🔴 skipif: 发现 2 个 vendor-specific skipif
-  - tests/test_copy.py:114: flag_gems.vendor_name == "metax"
-  - tests/test_copy.py:171: flag_gems.vendor_name == "metax"
-🟡 __init__.py: __all__ 列表未按字母序（1 个文件）
-🟡 code-style: black/isort/flake8 待修（2 个文件）
+**报告内容**（示例）：
+```markdown
+# PR #5395 待修复方案
 
-==================== 待确认的修复方案 ====================
-以下改动均**等你 review 确认后**才执行：
-
-[1] 🟢 无风险 · src/flag_gems/__init__.py
-    __all__ 列表按字母序排序（幂等）
-
-[2] 🟢 无风险 · tests/test_add.py
-    isort 重排 import
-
-[3] 🟡 低风险 · src/flag_gems/ops/add.py
-    black 格式化 + 移除未使用的 import
-
-[4] 🟡 低风险 · tests/test_copy.py:114,171
-    删除 vendor-specific skipif（依据：agent 核对确认 reason 不成立）
-    <展示 diff>
-
-⚠️  无法自动修，需你处理：
-  - tests/test_add.py:15: flake8 F821 - undefined name 'foo'
-
-请确认要执行哪些方案（全部 / 指定编号 / 跳过）。确认后我会在
-临时目录 /tmp/flaggems-pr-5395-xyz 落盘、重跑检查验证清零、生成 commit（不自动 push）。
+检查结果表格（通过/需修复/问题数）
+待确认修复方案（按风险等级分组）
+无法自动修复的问题
+确认执行？ [yes/no]
 ```
+
+向用户展示报告内容并等待确认。
+
+### Step 6: 执行修复并生成最终总结
+
+用户确认后：
+1. 执行所有修复（在临时目录）
+2. 验证修复（重跑检查全绿）
+3. 生成 commits
+4. 生成最终总结报告
+
+```bash
+# 准备修复结果 JSON
+cat > fixes-result.json << 'EOF'
+{
+  "applied": [
+    {"name": "skipif 违规修复", "files": ["tests/test_copy.py"]},
+    {"name": "code-style 修复", "files": ["tests/test_add.py", "src/flag_gems/ops/add.py"]}
+  ],
+  "commits": [
+    "abc123d: fix: remove vendor-specific skipif",
+    "def456a: style: apply formatting"
+  ],
+  "needs_human": ["tests/test_add.py:15 undefined name"],
+  "clone_dir": "/tmp/pr-fix-5395-xyz/repo"
+}
+EOF
+
+# 生成最终总结
+python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/generate_report.py \
+  single-final 5395 \
+  --repo flagos-ai/FlagGems \
+  --branch fix/add-convolution \
+  --checks checks-result.json \
+  --fixes fixes-result.json \
+  --output reports/PR-5395-final.md
+```
+
+**报告内容**（示例）：
+```markdown
+# PR #5395 Review 总结
+
+6 项检查，2 项通过，4 项已修复
+
+修改内容
+- skipif 违规修复: tests/test_copy.py
+- code-style 修复: tests/test_add.py, src/flag_gems/ops/add.py
+
+Commits: 2 个
+验证: 全部通过
+
+总结
+- 已修复: 4 项
+- 需人工处理: 1 项
+- 下一步: cd /tmp/pr-fix-5395-xyz/repo && git push origin HEAD:fix/add-convolution
+```
+
+向用户展示最终报告，告知下一步操作。
+
+### Step 7: 批量场景
+
+如果同时审查多个 PR，使用批量报告模式：
+
+```bash
+# 假设已完成多个 PR 的检查，每个生成了 checks JSON
+# checks/
+#   PR-5395-checks.json
+#   PR-5390-checks.json
+#   PR-5388-checks.json
+
+python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/generate_report.py \
+  batch \
+  --prs 5395 5390 5388 5387 \
+  --checks-dir ./checks/ \
+  --output reports/batch-2026-08-13.md
+```
+
+**报告内容**（示例）：
+```markdown
+# FlagGems PR 批量 Review 报告
+
+总览表格（PR、分支、状态、问题数、风险等级）
+
+统计
+- 全部通过: 1 个
+- 需修复: 3 个（其中高风险 1 个）
+- 总问题数: 15 项
+
+需关注的 PR
+- 高风险: #5387（is_cuda 违规 3 处）
+- 中风险: #5395（skipif 2 处）
+- 低风险: #5388, #5390
+```
+
+批量报告提供聚合视图，高风险 PR 详细列出，低风险 PR 只列编号，避免信息过载。
 
 ## 安全边界
 
@@ -420,8 +512,9 @@ wait
 
 ## 使用示例
 
+### 单个 PR 审查流程
+
 ```bash
-# 基本用法
 /review-flaggems-pr 5395
 
 # Agent 会：
@@ -430,8 +523,22 @@ wait
 # 3. 并行执行检查
 # 4. 对所有问题（排序、code-style、is_cuda、block_size、skipif、python-op）
 #    诊断根因、提出修复方案并标注风险等级
-# 5. 等用户 review 确认后再执行修复，重跑检查验证清零
-# 6. 生成最终报告
+# 5. 生成 Review 阶段报告（待确认方案）
+# 6. 等用户 review 确认后再执行修复，重跑检查验证清零
+# 7. 生成最终总结报告
+```
+
+### 批量 PR 审查流程
+
+```bash
+/review-flaggems-pr --batch 5395 5390 5388 5387
+
+# Agent 会：
+# 1. 对每个 PR 并行执行所有检查
+# 2. 生成批量聚合报告（总览表 + 风险分级）
+# 3. 高风险 PR 详细展示，低风险 PR 只列编号
+# 4. 根据用户选择，逐个或批量处理修复
+# 5. 每个 PR 修复后生成独立的最终总结
 ```
 
 ## 注意事项
@@ -445,6 +552,12 @@ wait
 4. **临时目录清理**：修复成功后保留临时目录供用户确认，失败或 clean 时自动清理。
 
 5. **跨仓库 PR**：如果 PR 来自 fork，会克隆 fork 仓库（可能更慢）。
+
+6. **报告文件**：
+   - Review 阶段报告：`reports/PR-{number}-review.md`（待确认方案）
+   - 最终总结报告：`reports/PR-{number}-final.md`（执行结果）
+   - 批量报告：`reports/batch-{timestamp}.md`（聚合视图）
+   - 所有报告文件保存在 `/Users/yufan.shi/Desktop/PR-Review/reports/`
 
 ## 扩展性
 
