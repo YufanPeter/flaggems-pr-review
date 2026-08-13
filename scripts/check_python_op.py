@@ -5,8 +5,8 @@ Check python-op CI job status for FlagGems PRs.
 The python-op job runs pytest on changed test files. This script:
 1. Fetches the PR's CI runs via GitHub API
 2. Finds the python-op job
-3. If failed, downloads logs and parses failures
-4. Categorizes failure types and provides fix suggestions
+3. If failed, downloads logs and extracts full failure context
+4. Agent analyzes logs and proposes fixes (no pre-categorization)
 """
 
 import argparse
@@ -208,99 +208,48 @@ def extract_failure_context(logs: str, file_path: str, test_name: str) -> Option
     return None
 
 
-def categorize_failure(failure: Dict[str, Any]) -> Dict[str, str]:
+def extract_detailed_log_context(logs: str, failure: Dict[str, Any]) -> str:
     """
-    Categorize the failure and provide suggestions.
+    Extract the full error context around this failure for agent analysis.
+
+    Returns the complete traceback and surrounding output so the agent can
+    analyze root cause without needing pre-categorization.
     """
-    error_type = failure['error_type']
-    error_msg = failure['error_message'].lower()
+    file_path = failure['file']
+    test_name = failure['test']
 
-    # ImportError / ModuleNotFoundError
-    if 'importerror' in error_type.lower() or 'modulenotfound' in error_type.lower():
-        return {
-            'category': 'import_error',
-            'severity': 'critical',
-            'suggestion': '缺少依赖或模块导入错误，检查 import 语句和已安装的包',
-        }
+    # For collection errors, return the import chain we already extracted
+    if test_name == '<collection>':
+        context_lines = []
+        if failure.get('context'):
+            context_lines.append("Import traceback:")
+            context_lines.append(failure['context'])
+        context_lines.append(f"\nError: {failure['error_message']}")
+        return '\n'.join(context_lines)
 
-    # AssertionError
-    if 'assertionerror' in error_type.lower():
-        if 'shape' in error_msg or 'size' in error_msg:
-            return {
-                'category': 'shape_mismatch',
-                'severity': 'high',
-                'suggestion': '输出 shape 不匹配，检查算子实现的维度计算',
-            }
-        if 'dtype' in error_msg or 'type' in error_msg:
-            return {
-                'category': 'dtype_mismatch',
-                'severity': 'high',
-                'suggestion': '数据类型不匹配，检查类型提升逻辑',
-            }
-        if 'allclose' in error_msg or 'equal' in error_msg:
-            return {
-                'category': 'numerical_error',
-                'severity': 'medium',
-                'suggestion': '数值精度问题，检查算子实现的数值计算',
-            }
-        return {
-            'category': 'assertion',
-            'severity': 'high',
-            'suggestion': '断言失败，检查算子输出是否符合预期',
-        }
+    # For normal test failures, find the full output section
+    # pytest formats test output as:
+    # _____ test_file.py::test_name _____
+    # ... output ...
+    # ... traceback ...
+    # FAILED
 
-    # TypeError
-    if 'typeerror' in error_type.lower():
-        if 'argument' in error_msg:
-            return {
-                'category': 'signature_mismatch',
-                'severity': 'critical',
-                'suggestion': '函数签名不匹配，检查参数名称和类型',
-            }
-        return {
-            'category': 'type_error',
-            'severity': 'high',
-            'suggestion': '类型错误，检查参数类型和返回值',
-        }
+    pattern = rf'_{re.escape(file_path)}::{re.escape(test_name)}_+\s+(.*?)\s+(?:FAILED|PASSED|ERROR)'
+    match = re.search(pattern, logs, re.DOTALL)
 
-    # NameError: name 'xxx' is not defined → missing import
-    if 'nameerror' in error_type.lower():
-        name_match = re.search(r"name '([^']+)' is not defined", failure['error_message'])
-        name = name_match.group(1) if name_match else ''
-        return {
-            'category': 'missing_import',
-            'severity': 'critical',
-            'suggestion': f"缺少 import：'{name}' 未定义，检查 import 语句是否完整",
-        }
+    if match:
+        full_output = match.group(1).strip()
+        # Limit to last 100 lines to avoid overwhelming the agent
+        lines = full_output.splitlines()
+        if len(lines) > 100:
+            lines = ['... (output truncated) ...'] + lines[-100:]
+        return '\n'.join(lines)
 
-    # AttributeError
-    if 'attributeerror' in error_type.lower():
-        return {
-            'category': 'attribute_error',
-            'severity': 'high',
-            'suggestion': '属性不存在，检查对象方法和属性',
-        }
-
-    # RuntimeError (CUDA errors, etc.)
-    if 'runtimeerror' in error_type.lower():
-        if 'cuda' in error_msg:
-            return {
-                'category': 'cuda_error',
-                'severity': 'critical',
-                'suggestion': 'CUDA 运行时错误，检查 kernel 实现和内存管理',
-            }
-        return {
-            'category': 'runtime_error',
-            'severity': 'high',
-            'suggestion': '运行时错误，检查算子实现逻辑',
-        }
-
-    # Default
-    return {
-        'category': 'unknown',
-        'severity': 'medium',
-        'suggestion': '未分类的错误，需要人工分析',
-    }
+    # Fallback: return what we have
+    parts = [f"Error: {failure['error_message']}"]
+    if failure.get('context'):
+        parts.append(f"Context:\n{failure['context']}")
+    return '\n'.join(parts)
 
 
 # --- Main check ---
@@ -368,6 +317,7 @@ def check_pr(pr_ref: str, json_output: bool = False) -> Dict[str, Any]:
 
     failures = []
     logs_unavailable = False
+    raw_logs = ''
     if job_id:
         try:
             raw_logs = get_job_logs(repo, job_id)
@@ -376,9 +326,9 @@ def check_pr(pr_ref: str, json_output: bool = False) -> Dict[str, Any]:
                 logs_unavailable = True
             else:
                 failures = parse_pytest_failures(raw_logs)
+                # Extract detailed context for each failure
                 for failure in failures:
-                    category_info = categorize_failure(failure)
-                    failure.update(category_info)
+                    failure['log_context'] = extract_detailed_log_context(raw_logs, failure)
         except subprocess.CalledProcessError:
             logs_unavailable = True
 
@@ -393,7 +343,6 @@ def check_pr(pr_ref: str, json_output: bool = False) -> Dict[str, Any]:
         'failures': failures,
         'summary': {
             'total': len(failures),
-            'by_category': _count_by_category(failures),
         },
     }
 
@@ -403,14 +352,6 @@ def check_pr(pr_ref: str, json_output: bool = False) -> Dict[str, Any]:
         _print_human(result)
 
     return result
-
-
-def _count_by_category(failures: List[Dict[str, Any]]) -> Dict[str, int]:
-    counts = {}
-    for f in failures:
-        cat = f.get('category', 'unknown')
-        counts[cat] = counts.get(cat, 0) + 1
-    return counts
 
 
 def _print_human(result: Dict[str, Any]) -> None:
@@ -434,12 +375,16 @@ def _print_human(result: Dict[str, Any]) -> None:
     print(f"共 {len(failures)} 个失败：\n")
     for i, failure in enumerate(failures, 1):
         print(f"{i}. {failure['file']}::{failure['test']}")
-        print(f"   错误类型  : {failure['error_type']}")
-        print(f"   错误分类  : {failure['category']} ({failure['severity']})")
-        print(f"   错误信息  : {failure['error_message']}")
-        print(f"   修复建议  : {failure['suggestion']}")
-        if failure.get('context'):
-            print(f"   上下文    :\n{failure['context']}")
+        print(f"   错误类型: {failure['error_type']}")
+        print(f"   错误信息: {failure['error_message']}")
+        if failure.get('log_context'):
+            # Truncate context for terminal display
+            context_lines = failure['log_context'].splitlines()
+            if len(context_lines) > 20:
+                preview = '\n'.join(context_lines[:20])
+                print(f"   日志片段:\n{preview}\n   ... (完整日志见 JSON 输出)")
+            else:
+                print(f"   日志片段:\n{failure['log_context']}")
         print()
 
 

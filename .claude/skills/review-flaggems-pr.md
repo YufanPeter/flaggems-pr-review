@@ -240,26 +240,26 @@ skipif 的分类只分两步（脚本已按此实现）：
 ```bash
 python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_python_op.py <PR> --json
 ```
-- **检查内容**：PR 的 CI 中 `python-op` job 是否失败，并解析失败原因
+- **检查内容**：PR 的 CI 中 `python-op` job 是否失败，并提取完整失败日志
 - **适用条件**：始终运行（不依赖改动文件类型）
-- **能否自动修复**：❌ 需 Agent 分析根因后人工确认
-- **退出码**：0=passed/skipped, 1=failed/error
+- **能否自动修复**：❌ 需 Agent 分析日志 + 读 PR 代码后提出方案，人工确认
+- **退出码**：0=passed/skipped, 1=failed
 - **输出格式**：JSON（`--json`）或人类可读
 
-**失败类型分类**：
-| 类型 | 严重度 | 含义 |
-|------|--------|------|
-| `missing_import` | critical | `NameError` / `ImportError`：缺少 import 语句 |
-| `import_error` | critical | `ModuleNotFoundError`：模块不存在 |
-| `assertion` | high | `AssertionError`：断言失败，结果不符合预期 |
-| `shape_mismatch` | high | 输出 tensor shape 与期望不符 |
-| `dtype_mismatch` | high | 输出 dtype 与期望不符 |
-| `numerical_error` | medium | 精度不足或数值错误 |
-| `signature_mismatch` | high | 函数签名不兼容 |
-| `type_error` | medium | `TypeError`：类型不匹配 |
-| `attribute_error` | medium | `AttributeError`：属性访问失败 |
-| `cuda_error` | high | CUDA runtime 错误 |
-| `runtime_error` | high | 其他运行时错误 |
+**工作流程**：
+1. **脚本职责（detect）**：
+   - 判断 python-op job 是否失败
+   - 提取每个失败测试的完整日志上下文（error message + traceback + 周围输出）
+   - 输出 JSON 包含 `failures` 数组，每项有 `file`、`test`、`error_type`、`error_message`、`log_context`
+
+2. **Agent 职责（propose）**：
+   - 读取脚本输出的 `log_context`（完整日志，不依赖预分类）
+   - 读取 PR 改动的代码，定位根因
+   - 综合日志 + 代码 + 外部上下文（如 reviewer 意图），提出具体修复方案
+
+3. **人工确认（approve）**：
+   - Agent 向用户展示方案 + 理由
+   - 用户确认后再执行
 
 **过期日志处理**：CI 日志在 Azure Blob 上保存约 90 天。若日志已过期，输出 `logs_unavailable: true` 并附上 Job URL 供人工查看。
 
@@ -335,12 +335,13 @@ wait
 5. 执行修复，重跑 `check_skipif.py` 验证清零
 
 #### python-op CI 失败
-1. 解析日志里的失败类型和位置
-2. 读取相关源文件，定位根因
-3. 提出修复方案（例：补 import、修算子实现、修测试断言）
-4. 向用户展示方案，**等用户确认后再执行**
-5. 执行修复，提示重新触发 CI 验证
-6. `logs_unavailable` 时：告知日志已过期，提供 Job URL，让用户手动确认失败类型后再走上述流程
+1. **读取脚本输出**：check_python_op.py 提取了完整的 `log_context`（error message + traceback + 周围输出）
+2. **Agent 分析日志**：读 `log_context`，判断错误类型（ImportError/NameError/AssertionError/shape_mismatch 等）
+3. **读取 PR 代码**：定位 PR 改动的相关文件，结合日志理解根因
+4. **提出修复方案**：基于日志 + 代码分析，给出具体修复步骤（例：补 import、修函数定义对齐、修算子实现、修测试断言）
+5. **向用户展示方案**，标注风险等级，**等用户确认后再执行**
+6. 执行修复，提示重新触发 CI 验证
+7. `logs_unavailable` 时：告知日志已过期，提供 Job URL，让用户手动确认失败类型后再走上述流程
 
 #### 排序问题（__init__.py 或 operators.yaml）
 1. Clone PR 仓库到临时目录，读取文件算出排序后的结果
