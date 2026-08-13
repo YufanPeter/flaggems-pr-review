@@ -348,12 +348,16 @@ wait
 3. 确认后：写回 → 重跑检查脚本验证（退出码应为 0）
 4. 生成 commit（但不自动 push）
 
-#### code-style 问题
-- **调用 fix_code_style.py 算出改动**
-- 根据返回状态：
-  - `clean`：无需处理
-  - `fixable`：**向用户展示 diff 和风险等级（机械修复 🟢 / Agent 修复 🟡），等确认后**再落盘生成 commit
-  - `needs_human`：报告无法自动修的问题
+#### code-style 问题（两阶段模式）
+1. **Phase 1 (dry-run)**: 调用 `fix_code_style_v2.py dry-run <PR> --json` 计算修复方案
+2. **展示方案**: 向用户展示 mechanical_diff 和 agent_diff，标注风险等级（机械 🟢 / Agent 🟡）
+3. **Phase 2 (apply)**: 用户确认后，调用 `fix_code_style_v2.py apply <state_file>` 执行 commit
+4. **验证**: 脚本自动重跑 pre-commit 验证清零
+
+根据 Phase 1 返回状态：
+  - `clean`：首次运行全绿，无需修复
+  - `fixable`：有修复方案，按上述流程走
+  - `needs_human`：无法自动修，报告阻塞的 hooks
 
 ### Step 5: 生成最终报告
 
@@ -432,7 +436,7 @@ wait
 
 ## 注意事项
 
-1. **首次运行慢**：`fix_code_style.py` 首次运行会安装 pre-commit hooks（1-3 分钟），后续使用缓存。
+1. **首次运行慢**：`fix_code_style_v2.py` 首次运行会安装 pre-commit hooks（1-3 分钟），后续使用缓存。
 
 2. **网络依赖**：需要克隆 PR 仓库，网络慢时可能耗时较长。
 
