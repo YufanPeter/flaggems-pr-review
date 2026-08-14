@@ -2,19 +2,28 @@
 """
 Check for hardcoded BLOCK_SIZE in FlagGems PRs.
 
-Problem: Writing BLOCK_SIZE = 1024 as a fixed constant in a launcher function
-means Triton's JIT compiles only one kernel variant and cannot pick an optimal
-size based on the actual workload.
+Problem: Writing hardcoded integers in tl.arange() inside @triton.jit kernels
+bypasses the tl.constexpr parameterization mechanism, forcing Triton to compile
+only one kernel variant.
 
-Correct pattern:
-    BLOCK_SIZE = min(1024, triton.next_power_of_2(N))
-    BLOCK_SIZE = triton.next_power_of_2(math.ceil(math.sqrt(N)))
+Correct pattern (kernel declares BLOCK_SIZE: tl.constexpr and uses it):
+    @triton.jit
+    def my_kernel(..., BLOCK_SIZE: tl.constexpr):
+        offsets = tl.arange(0, BLOCK_SIZE)  # ✅ uses the constexpr param
+
+Wrong pattern (kernel declares constexpr but ignores it):
+    @triton.jit
+    def my_kernel(..., BLOCK_SIZE: tl.constexpr):
+        offsets = tl.arange(0, 128)  # ❌ hardcoded, ignores BLOCK_SIZE
 
 Detection rule:
-    1. Inside a launcher function (not a @triton.jit kernel)
-    2. BLOCK_SIZE = <integer literal> (e.g. 1024, 512, 256)
-    3. That value is passed directly to the kernel as a constexpr param
-    4. Without any dynamic adjustment via triton.next_power_of_2() / min()
+    1. Inside @triton.jit kernel functions
+    2. tl.arange(start, stop) where stop is an integer literal > 1
+    3. The kernel has a tl.constexpr parameter with a name containing BLOCK/SIZE/TILE
+    4. That suggests the literal should use the constexpr parameter instead
+
+Note: Hardcoded values in launcher functions (host code) are allowed —
+they decide which specialized kernel variant to invoke.
 """
 
 import argparse
@@ -91,19 +100,48 @@ def is_triton_kernel(node: ast.FunctionDef) -> bool:
     return False
 
 
+def has_constexpr_block_param(func_def: ast.FunctionDef) -> List[str]:
+    """
+    Return list of parameter names that are tl.constexpr and contain BLOCK/SIZE/TILE.
+
+    Example:
+        def kernel(..., BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
+    Returns: ['BLOCK_SIZE_M', 'BLOCK_SIZE_N']
+    """
+    constexpr_params = []
+    for arg in func_def.args.args:
+        if arg.annotation is None:
+            continue
+        # Check if annotation is tl.constexpr
+        is_constexpr = False
+        ann = arg.annotation
+        if isinstance(ann, ast.Attribute) and ann.attr == 'constexpr':
+            is_constexpr = True
+        elif isinstance(ann, ast.Name) and ann.id == 'constexpr':
+            is_constexpr = True
+
+        if is_constexpr:
+            param_name = arg.arg
+            # Only track block/size/tile related params
+            if any(kw in param_name.upper() for kw in ['BLOCK', 'SIZE', 'TILE']):
+                constexpr_params.append(param_name)
+
+    return constexpr_params
+
+
 def find_hardcoded_block_sizes(source: str, filepath: str) -> List[Dict[str, Any]]:
     """
-    Find BLOCK_SIZE = <literal int> assignments in launcher functions and
-    at module level.
+    Find hardcoded integer literals in tl.arange() calls inside @triton.jit kernels
+    that should use tl.constexpr parameters instead.
 
-    Allowed (dynamic, not reported):
-      - triton.next_power_of_2(...)
-      - min(N, ...)
-      - any non-literal right-hand side
-      - BLOCK_SIZE = 1  (edge-case handling for empty/tiny data)
+    Checks:
+      - tl.arange(start, LITERAL) where LITERAL is int > 1
+      - The kernel has BLOCK_SIZE*/TILE_* constexpr parameters
+      - Suggests the literal should use the constexpr param
 
-    Not allowed (hardcoded, reported):
-      - BLOCK_SIZE = 1024  (or any other literal > 1 in a launcher/module scope)
+    Does NOT check:
+      - Launcher functions (host code) — hardcoded values are OK there
+      - Module-level constants — those decide which kernel variant to call
     """
     try:
         tree = ast.parse(source)
@@ -113,65 +151,64 @@ def find_hardcoded_block_sizes(source: str, filepath: str) -> List[Dict[str, Any
     lines = source.splitlines()
     violations = []
 
-    def check_assign(node: ast.Assign, in_kernel: bool,
-                     func_name: str, is_module_level: bool) -> None:
-        # Only check BLOCK_SIZE-named variables
-        for target in node.targets:
-            if not isinstance(target, ast.Name):
-                continue
-            var = target.id
-            if 'BLOCK_SIZE' not in var.upper():
-                continue
-
-            # Skip declarations inside @triton.jit kernels (they're constexpr params,
-            # not the kind of hardcoding we care about)
-            if in_kernel:
-                continue
-
-            value = node.value
-            # Only flag literal integer assignments
-            if not isinstance(value, ast.Constant) or not isinstance(value.value, int):
-                continue
-
-            literal_val = value.value
-
-            # BLOCK_SIZE = 1 is a legitimate edge-case guard
-            if literal_val == 1:
-                continue
-
-            lineno = node.lineno
-            line_content = lines[lineno - 1].strip() if lineno <= len(lines) else ''
-
-            location = 'module level' if is_module_level else f'launcher `{func_name}`'
-            violations.append({
-                'file': filepath,
-                'line': lineno,
-                'variable': var,
-                'value': literal_val,
-                'code': line_content,
-                'location': location,
-                'message': (
-                    f"`{var} = {literal_val}` is hardcoded in {location}. "
-                    f"Use a dynamic expression such as "
-                    f"`min({literal_val}, triton.next_power_of_2(N))` so Triton "
-                    f"can JIT-compile the optimal kernel size for each workload."
-                ),
-            })
-
-    # Check module-level assignments
-    for stmt in ast.iter_child_nodes(tree):
-        if isinstance(stmt, ast.Assign):
-            check_assign(stmt, in_kernel=False, func_name='', is_module_level=True)
-
-    # Check inside each function
+    # Find all @triton.jit kernels
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
-        in_kernel = is_triton_kernel(node)
-        for stmt in ast.walk(node):
-            if isinstance(stmt, ast.Assign):
-                check_assign(stmt, in_kernel=in_kernel,
-                             func_name=node.name, is_module_level=False)
+        if not is_triton_kernel(node):
+            continue
+
+        # Check if kernel has constexpr block params
+        constexpr_params = has_constexpr_block_param(node)
+        if not constexpr_params:
+            # No constexpr params declared, nothing to check
+            continue
+
+        # Scan kernel body for tl.arange(...) calls with literal stop
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+
+            # Match tl.arange or triton.language.arange
+            func = child.func
+            is_arange = False
+            if isinstance(func, ast.Attribute) and func.attr == 'arange':
+                is_arange = True
+            elif isinstance(func, ast.Name) and func.id == 'arange':
+                is_arange = True
+
+            if not is_arange or len(child.args) < 2:
+                continue
+
+            # Check if stop (2nd arg) is a literal int > 1
+            stop_arg = child.args[1]
+            if not isinstance(stop_arg, ast.Constant):
+                continue
+            if not isinstance(stop_arg.value, int):
+                continue
+
+            literal_val = stop_arg.value
+            if literal_val <= 1:
+                # 0 or 1 are neutral, not block size related
+                continue
+
+            lineno = child.lineno
+            line_content = lines[lineno - 1].strip() if lineno <= len(lines) else ''
+
+            violations.append({
+                'file': filepath,
+                'line': lineno,
+                'literal': literal_val,
+                'code': line_content,
+                'kernel': node.name,
+                'constexpr_params': constexpr_params,
+                'message': (
+                    f"Hardcoded literal {literal_val} in tl.arange() inside kernel `{node.name}`. "
+                    f"The kernel declares constexpr params {constexpr_params} but does not use them. "
+                    f"Replace the literal with the appropriate constexpr parameter so Triton can "
+                    f"JIT-compile different tile sizes."
+                ),
+            })
 
     return violations
 
@@ -247,26 +284,28 @@ def _print_human(result: Dict[str, Any]) -> None:
     violations = result['violations']
 
     if not violations:
-        print(f"OK  PR #{pr}: no hardcoded BLOCK_SIZE found")
+        print(f"OK  PR #{pr}: no hardcoded literals in @triton.jit kernels")
         return
 
-    print(f"FAIL  PR #{pr}: {len(violations)} hardcoded BLOCK_SIZE issue(s)\n")
+    print(f"FAIL  PR #{pr}: {len(violations)} hardcoded literal(s) in @triton.jit kernels\n")
     for v in violations:
-        print(f"  {v['file']}:{v['line']}")
-        print(f"    code : {v['code']}")
-        print(f"    issue: {v['message']}")
+        print(f"  {v['file']}:{v['line']} (kernel `{v['kernel']}`)")
+        print(f"    code    : {v['code']}")
+        print(f"    literal : {v['literal']}")
+        print(f"    constexpr params: {', '.join(v['constexpr_params'])}")
+        print(f"    issue   : {v['message']}")
         print()
 
     print(
-        "Note: a hardcoded BLOCK_SIZE forces Triton to compile a single fixed\n"
-        "      kernel variant and prevents workload-adaptive optimisation.\n"
-        "      Replace with: BLOCK_SIZE = min(1024, triton.next_power_of_2(N))"
+        "Note: Hardcoded literals in tl.arange() inside @triton.jit kernels prevent\n"
+        "      Triton from compiling different tile-size variants. Use the declared\n"
+        "      tl.constexpr parameters instead: tl.arange(0, BLOCK_SIZE)"
     )
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Check FlagGems PR for hardcoded BLOCK_SIZE")
+        description="Check FlagGems PR for hardcoded literals in @triton.jit kernels")
     parser.add_argument('pr', help='PR number or full URL')
     parser.add_argument('--json', action='store_true', help='JSON output')
     args = parser.parse_args()
