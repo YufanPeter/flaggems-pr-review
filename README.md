@@ -39,7 +39,11 @@ PR-Review/
 │   └── README.md                      # 报告文件说明
 ├── .claude/
 │   └── skills/
-│       └── review-flaggems-pr.md      # PR review 完整工作流 skill
+│       └── review-flaggems-pr/        # PR review 完整工作流 skill
+│           ├── SKILL.md               # 主流程（精简）
+│           └── reference/             # 按需加载的细节
+│               ├── skipif-verification.md
+│               └── report-generation.md
 └── README.md                           # 本文档
 ```
 
@@ -196,7 +200,7 @@ python3.11 scripts/generate_report.py batch \
 
 ## 🎯 集成使用：review-flaggems-pr skill
 
-完整的 PR review 工作流封装在 `.claude/skills/review-flaggems-pr.md`，自动执行：
+完整的 PR review 工作流封装在 `.claude/skills/review-flaggems-pr/`，自动执行：
 
 1. **智能选择检查项**（根据 PR 改动文件类型）
 2. **并行执行检查**
