@@ -127,28 +127,40 @@ python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/fix_code_style_v2.py apply
 ```bash
 python3.11 /Users/yufan.shi/Desktop/PR-Review/scripts/check_block_size.py <PR> --json
 ```
-- **检查内容**：Triton kernel launcher 里的 `BLOCK_SIZE = <literal>` 硬编码
+- **检查内容**：`@triton.jit` kernel **函数体内** `tl.arange(0, <整数字面量>)` 硬编码，且该 kernel 声明了名称含 BLOCK/SIZE/TILE 的 `tl.constexpr` 参数
 - **适用条件**：改动了 `src/flag_gems/ops/` 或 `src/flag_gems/fused/` 下的算子
-- **修复流程**：Agent 诊断（读上下文、看 N 来源）→ 提出方案 → 用户确认 → 执行
+- **修复流程**：Agent 诊断（确认 kernel 声明了哪个 constexpr 参数）→ 提出方案 → 用户确认 → 执行
 - **退出码**：0=clean, 1=has_violations
 - **输出格式**：JSON（`--json`）或人类可读
 
-**为什么重要**：硬编码的 `BLOCK_SIZE` 让 Triton 只编译一个固定的 kernel 版本，无法根据实际数据量（N）动态选择最优的 block size。小数据浪费资源，大数据缺少优化。
+**为什么重要**：`@triton.jit` 标记的是 GPU kernel 本身。kernel 声明 `BLOCK_SIZE: tl.constexpr` 是为了让 Triton 针对不同 tile 尺寸编译多个特化版本。如果 kernel 体内用 `tl.arange(0, 1024)` 写死字面量，就绕过了这个机制，constexpr 参数形同虚设，Triton 只能编译单一版本。
+
+**⚠️ 检查范围（重要）**：
+- ❌ **只查 `@triton.jit` kernel 函数体内的字面量** —— 这是真问题
+- ✅ **launcher / host 代码里 `BLOCK_SIZE = 1024` 是合法的** —— 它只是决定调用哪个已特化的 kernel variant，不报
+- ✅ **模块级常量 `BLOCK_SIZE = 1024` 合法** —— 同理，不报
+- ✅ **kernel 没有 constexpr 参数时** —— 字面量合理，不报
 
 **问题模式**：
 ```python
-# ❌ 硬编码
-N = x.numel()
-BLOCK_SIZE = 1024  # 无论 N 是 100 还是 100万
-kernel[grid](x, N, BLOCK_SIZE=BLOCK_SIZE)
+# ❌ kernel 体内写死，忽略了声明的 constexpr 参数
+@triton.jit
+def my_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.arange(0, 1024)  # ← 应该用 BLOCK_SIZE
 ```
 
 **正确模式**：
 ```python
-# ✅ 动态调整
-N = x.numel()
-BLOCK_SIZE = min(1024, triton.next_power_of_2(N))
-kernel[grid](x, N, BLOCK_SIZE=BLOCK_SIZE)
+# ✅ kernel 体内使用声明的 constexpr 参数
+@triton.jit
+def my_kernel(x_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    offsets = tl.arange(0, BLOCK_SIZE)
+
+# ✅ launcher 里 hardcode 完全允许（host 代码，决定调哪个特化版本）
+def launcher(x, out):
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(x.numel(), BLOCK_SIZE),)
+    my_kernel[grid](x, out, x.numel(), BLOCK_SIZE=BLOCK_SIZE)
 ```
 
 ### 6. pytest.mark.skipif 检查
@@ -321,11 +333,13 @@ wait
 3. 向用户说明每处改动的理由，**等用户确认后再执行**
 4. 执行修复，重跑 `check_is_cuda.py` 验证清零
 
-#### block_size 硬编码
-1. 读取违规文件，查看上下文（launcher 函数、N 的来源）
-2. 提出修复方案（例：`BLOCK_SIZE = min(1024, triton.next_power_of_2(N))`）
+#### block_size 硬编码（kernel 体内）
+1. 读取违规文件，确认 kernel 声明了哪个 `tl.constexpr` 参数（BLOCK_SIZE / TILE 等）
+2. 提出修复方案：把 kernel 体内 `tl.arange(0, <字面量>)` 改用对应的 constexpr 参数（例：`tl.arange(0, BLOCK_SIZE)`）
 3. 向用户说明每处改动，**等用户确认后再执行**
 4. 执行修复，重跑 `check_block_size.py` 验证清零
+
+> 注意：launcher / 模块级的 `BLOCK_SIZE = <literal>` 不是违规，脚本不会报，也不需要改。
 
 #### skipif 问题
 1. 汇总所有 skipif 问题（按 critical/warning/info 分组）
