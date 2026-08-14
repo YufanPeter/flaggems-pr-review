@@ -20,10 +20,10 @@ class TestParseDiffFiles(unittest.TestCase):
 
     def test_parse_simple_diff(self):
         """测试解析简单的 diff"""
-        diff = """diff --git a/src/ops/test.py b/src/ops/test.py
+        diff = """diff --git a/src/flag_gems/ops/example.py b/src/flag_gems/ops/example.py
 index 1234567..abcdefg 100644
---- a/src/ops/test.py
-+++ b/src/ops/test.py
+--- a/src/flag_gems/ops/example.py
++++ b/src/flag_gems/ops/example.py
 @@ -10,3 +10,5 @@ def foo():
      pass
 +
@@ -32,8 +32,8 @@ index 1234567..abcdefg 100644
 +        return True
 """
         files = parse_diff_files(diff)
-        self.assertIn('src/ops/test.py', files)
-        lines = files['src/ops/test.py']
+        self.assertIn('src/flag_gems/ops/example.py', files)
+        lines = files['src/flag_gems/ops/example.py']
         # 应该有 4 行新增：空行、def bar()、if x.is_cuda、return True
         self.assertEqual(len(lines), 4)
         # 检查 is_cuda 那行
@@ -63,21 +63,21 @@ class TestCheckIsCudaAbuse(unittest.TestCase):
     def test_detect_is_cuda_property(self):
         """测试检测 .is_cuda 属性"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (42, '    if x.is_cuda:'),
                 (43, '        return True')
             ]
         }
         violations = check_is_cuda_abuse(files)
         self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0]['file'], 'src/ops/test.py')
+        self.assertEqual(violations[0]['file'], 'src/flag_gems/ops/example.py')
         self.assertEqual(violations[0]['line'], 42)
         self.assertIn('is_cuda', violations[0]['matched'])
 
     def test_detect_torch_cuda_module(self):
         """测试检测 torch.cuda 模块使用"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (10, 'import torch.cuda'),
                 (20, 'device = torch.cuda.current_device()'),
             ]
@@ -89,7 +89,7 @@ class TestCheckIsCudaAbuse(unittest.TestCase):
     def test_detect_hardcoded_cuda_string(self):
         """测试检测硬编码 'cuda' 字符串"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (30, '    if device.type == "cuda":'),
             ]
         }
@@ -100,7 +100,7 @@ class TestCheckIsCudaAbuse(unittest.TestCase):
     def test_skip_comments(self):
         """测试跳过注释行"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (10, '# This is a comment about is_cuda'),
                 (11, '    # Another comment with torch.cuda'),
             ]
@@ -126,7 +126,7 @@ class TestCheckIsCudaAbuse(unittest.TestCase):
     def test_no_violations(self):
         """测试正确的代码（无违规）"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (10, 'from flag_gems.runtime import torch_device_fn'),
                 (20, '    if x.device.type == runtime.device.name:'),
                 (30, '        device_fn = torch_device_fn()'),
@@ -138,7 +138,7 @@ class TestCheckIsCudaAbuse(unittest.TestCase):
     def test_allow_torch_cudnn(self):
         """测试允许 torch.cudnn（不是 torch.cuda）"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (10, 'import torch.cudnn as cudnn'),
             ]
         }
@@ -163,7 +163,7 @@ class TestEdgeCases(unittest.TestCase):
     def test_multiple_violations_same_line(self):
         """测试同一行有多个违规"""
         files = {
-            'src/ops/test.py': [
+            'src/flag_gems/ops/example.py': [
                 (10, '    if x.is_cuda and torch.cuda.is_available():'),
             ]
         }

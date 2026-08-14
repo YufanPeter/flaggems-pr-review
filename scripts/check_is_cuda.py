@@ -120,25 +120,28 @@ def should_check_file(file_path: str) -> bool:
     return False
 
 
+def remove_comments(line: str) -> str:
+    """移除行尾注释（# 后的所有内容），保留字符串字面量。"""
+    if '#' in line:
+        line = line[:line.index('#')]
+    return line
+
+
 def remove_comments_and_strings(line: str) -> str:
     """
     移除行中的注释和字符串，只保留实际代码。
 
+    用于 .is_cuda / torch.cuda 这类模式：字符串里出现这些词不算违规，
+    先清空字符串再匹配可避免误报。
+
     简化处理：
-    - 移除 # 后的所有内容（行尾注释）
     - 移除引号内的内容
+    - 移除 # 后的所有内容（行尾注释）
     """
     # 先处理字符串（简化：假设没有转义引号）
-    # 移除单引号字符串
     line = re.sub(r"'[^']*'", '""', line)
-    # 移除双引号字符串
     line = re.sub(r'"[^"]*"', '""', line)
-
-    # 移除注释（# 后的所有内容）
-    if '#' in line:
-        line = line[:line.index('#')]
-
-    return line
+    return remove_comments(line)
 
 
 def check_is_cuda_abuse(files: Dict[str, List[tuple]]) -> List[Dict[str, Any]]:
@@ -173,7 +176,8 @@ def check_is_cuda_abuse(files: Dict[str, List[tuple]]) -> List[Dict[str, Any]]:
             'regex': re.compile(r'device\.type\s*(==|!=|in)\s*["\']cuda["\']'),
             'description': '硬编码 "cuda" 字符串',
             'suggestion': '使用 runtime.device.name',
-            'reference': 'flaggems-domain.md §2.7'
+            'reference': 'flaggems-domain.md §2.7',
+            'keep_strings': True,  # 该模式需匹配字符串字面量本身
         }
     ]
 
@@ -183,16 +187,19 @@ def check_is_cuda_abuse(files: Dict[str, List[tuple]]) -> List[Dict[str, Any]]:
             continue
 
         for line_num, content in lines:
-            # 移除注释和字符串后再检查
-            code_only = remove_comments_and_strings(content)
+            # 两种清洗：去注释去字符串（默认，避免字符串误报）；
+            # 只去注释保留字符串（供需匹配字符串字面量的模式使用）
+            code_no_strings = remove_comments_and_strings(content)
+            code_keep_strings = remove_comments(content)
 
-            # 如果移除后是空的，跳过
-            if not code_only.strip():
+            # 如果去注释后是空的（纯注释行），跳过
+            if not code_keep_strings.strip():
                 continue
 
             # 检查每个模式
             for pattern in patterns:
-                match = pattern['regex'].search(code_only)
+                target = code_keep_strings if pattern.get('keep_strings') else code_no_strings
+                match = pattern['regex'].search(target)
                 if match:
                     violation = {
                         'file': file_path,
